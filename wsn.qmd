@@ -1,0 +1,160 @@
+---
+jupyter:
+  jupytext:
+    text_representation:
+      extension: .qmd
+      format_name: quarto
+      format_version: '1.0'
+      jupytext_version: 1.19.3
+  kernelspec:
+    display_name: Python (academia)
+    language: python
+    name: academia
+execute:
+  dir: project
+---
+
+# Multi-Objective Edge WiFi Sensor Deployment
+This pipeline models the deployment of a Wireless Sensor Network (WSN) in a 2D indoor environment. The optimization targets maximizing area coverage and connectivity while minimizing infrastructure cost, utilizing precomputed collision matrices to accelerate the metaheuristic search space evaluation.
+
+## 1. Environment & Vectorized Geometry Setup
+Deploying edge sensor nodes in a complex indoor environment is a classic combinatorial optimization problem. Traditional deployments often yield cost-inefficient networks or suffer from dead zones due to indoor interference.
+To model this, we discretize the building floor plan into a 2D binary matrix. Valid deployment spaces are represented by `0`, while walls and obstacles—which actively degrade radio wave propagation—are marked as `-1`. By vectorizing this room geometry, we can computationally evaluate line-of-sight collisions between any two points in the building.
+
+```{python}
+import numpy as np
+import matplotlib.pyplot as plt
+
+np.random.seed(46)
+```
+
+```{python}
+from src.geometry import get_room_vector
+
+room = np.array([
+    [1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1],
+    [1, 0, 0, 0, 0, 0, 0, 0, 1, 0, 0, 0, 0, 0, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1],
+    [1, 0, 0, 0, 0, 0, 0, 0, 1, 0, 0, 0, 0, 0, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1],
+    [1, 0, 0, 0, 0, 0, 0, 0, 1, 0, 0, 0, 0, 0, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1],
+    [1, 0, 0, 0, 0, 0, 0, 0, 1, 0, 0, 0, 0, 0, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1],
+    [1, 1, 1, 1, 1, 1, 0, 0, 1, 1, 1, 1, 0, 0, 1, 1, 1, 1, 1, 0, 0, 0, 0, 0, 1],
+    [1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 0, 1, 0, 0, 0, 0, 0, 0, 1, 0, 0, 0, 0, 0, 1],
+    [1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 0, 1, 0, 0, 0, 0, 0, 0, 1, 0, 0, 0, 0, 0, 1],
+    [1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 0, 1, 0, 0, 0, 0, 0, 0, 1, 0, 0, 0, 0, 0, 1],
+    [1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 0, 1, 0, 0, 0, 0, 0, 0, 1, 0, 0, 0, 0, 0, 1],
+    [1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 0, 1, 0, 0, 0, 0, 0, 0, 1, 0, 0, 0, 0, 0, 1],
+    [1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 0, 1, 0, 0, 0, 0, 0, 0, 1, 0, 0, 0, 0, 0, 1],
+    [1, 0, 0, 0, 0, 0, 0, 0, 1, 1, 1, 1, 0, 0, 0, 0, 1, 1, 1, 1, 0, 0, 0, 0, 1],
+    [1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1],
+    [1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1],
+])
+room *= -1
+room = room.T
+room_vector = get_room_vector(room)
+```
+
+## 2. Physics Modeling & Matrix Precomputations
+Evaluating spatial distances and segment collisions on the fly during an optimization loop is computationally prohibitive. Because our search space is discrete, we can dramatically accelerate the metaheuristics by precomputing the environment.
+We calculate the pairwise Euclidean distances and the number of wall collisions for every valid cell pair and store them in $\mathcal{O}(M^2)$ matrices.
+We model the signal propagation using a log-normal shadowing model tailored for indoor environments. The received power $P_{rec}(d)$ decays logarithmically with distance but is heavily penalized by the obstacle path loss $L_{obs}$ whenever the line-of-sight intersects a wall. The raw received power is then mapped to a connection probability $\rho$ using the Q-function, giving us a probabilistic threshold for whether a sensor can successfully detect an event.
+
+$$
+    P_{rec}(d) = P_{tr} - PL(d_0) - 10n \log (\frac{d}{d_0}) + \chi_{\sigma} - L_{obs}
+$$
+$$
+\rho (s,d(s,rec)) = Q \left[ \frac {\lambda - P_{rec}(d)}{\sigma} \right]
+$$
+
+```{python}
+from src.physics import precompute_connection_probabilities, precompute_room_environment
+
+
+valid_cells, distance_matrix, collision_matrix = precompute_room_environment(room, room_vector)
+prob_matrix = precompute_connection_probabilities(distance_matrix, collision_matrix)
+```
+
+## 3. Visualization Suite & Physics Verification
+Visualizing discrete coverage models often results in harsh, pixelated grids that are difficult to analyze. To generate publication-ready continuous heatmaps, we compute the raw coverage matrix at a low resolution, upscale the grid dynamically using bilinear spline interpolation, and apply a high-resolution Gaussian blur. This provides a silky-smooth contour map of the coverage intensity without the computational overhead of calculating millions of sub-grid points.
+
+
+Let's test the radio physics model using subplots:
+
+```{python}
+from src.visualization import draw_prob_heatmap_on_ax, draw_rssi_heatmap_on_ax, draw_coverage_heatmap_on_ax
+test_sender = np.array([2, 3])
+fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(14, 6))
+
+im1 = draw_rssi_heatmap_on_ax(ax1, test_sender, room_vector, resolution=0.1)
+fig.colorbar(im1, ax=ax1, label="Received Power (dBm)", shrink=0.7)
+
+im2 = draw_prob_heatmap_on_ax(ax2, test_sender, room_vector, resolution=0.1)
+fig.colorbar(im2, ax=ax2, label="Probability", shrink=0.7)
+
+plt.tight_layout()
+plt.show()
+```
+
+## 4. Metaheuristics & Objectives
+A successful deployment must balance competing objectives: maximizing the functional area coverage while strictly minimizing the infrastructural footprint (deployment cost). To navigate this highly non-convex search space, we implement two distinct metaheuristic baselines.
+First, we use a **Simulated Annealing (SA)** algorithm equipped with a *Geometry-Aware* neighborhood function. Instead of blindly teleporting sensors across the map, the mutation operator prioritizes local spatial adjustments—sliding a sensor to an adjacent valid cell before attempting a full relocation.
+Second, we implement a **Genetic Algorithm (GA)**. While SA is a single-solution trajectory method that can get trapped in deep local optima, the GA's population-based approach maintains structural diversity. By using tournament selection and uniform crossover, the GA can merge the best topological features from multiple parent layouts to explore the solution space more aggressively.
+
+## 5. Execution & Multi-Plot Evaluation
+With the environment precomputed and the metaheuristics defined, we execute both the SA and GA pipelines and evaluate their final performance. By comparing their optimization trajectories alongside the final infrastructure costs and high-resolution spatial coverage maps, we can determine the most efficient WSN deployment strategy for the given indoor topology.
+
+```{python}
+from src.optimization import random_sensors, geometry_aware_SA, genetic_algorithm, calculate_deployment_cost
+
+K_SENSORS = 12
+SA_ITERS = 10000
+GA_GENS = 10000
+
+X_init = random_sensors(room, K_SENSORS)
+SA_best_X, SA_results = geometry_aware_SA(X_init, room, valid_cells, distance_matrix, collision_matrix, 0.99995, 0.001, SA_ITERS)
+GA_best_X, GA_results = genetic_algorithm(room, valid_cells, distance_matrix, collision_matrix, k=K_SENSORS, pop_size=40, gens=GA_GENS)
+
+# ---------------------------------------------------------
+# Subplots Part 1: Optimization Metrics
+# ---------------------------------------------------------
+fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(15, 5))
+
+# Plot 1: Optimization Curve
+ax1.plot(SA_results[:GA_GENS], label="Simulated Annealing", color='orange', linewidth=2)
+ax1.plot(GA_results, label="Genetic Algorithm", color='blue', linewidth=2)
+ax1.set_xlabel("Generations / Iterations")
+ax1.set_ylabel("Coverage Rate")
+ax1.set_title("Optimization Trajectory: SA vs GA")
+ax1.legend()
+ax1.grid(True, alpha=0.3)
+
+# Plot 2: Deployment Cost
+sa_cost = calculate_deployment_cost(SA_best_X)
+ga_cost = calculate_deployment_cost(GA_best_X)
+bars = ax2.bar(['Simulated Annealing', 'Genetic Algorithm'], [sa_cost, ga_cost], color=['orange', 'blue'], alpha=0.8)
+ax2.set_ylabel("Total Cost (Units)")
+ax2.set_title("Final Infrastructure Cost")
+ax2.grid(axis='y', alpha=0.3)
+for bar in bars:
+    yval = bar.get_height()
+    ax2.text(bar.get_x() + bar.get_width()/2, yval + 0.2, int(yval), ha='center', va='bottom', fontweight='bold')
+
+plt.tight_layout()
+plt.show()
+```
+
+```{python}
+fig, (ax3, ax4) = plt.subplots(1, 2, figsize=(18, 7))
+
+RESOLUTION=0.5
+UPSCALE=15
+BLUR_SIGMA=6
+
+im3 = draw_coverage_heatmap_on_ax(ax3, SA_best_X, room_vector, radius=3, resolution=RESOLUTION, upscale_factor=UPSCALE, blur_sigma=BLUR_SIGMA, title=f"SA Best Solution (Coverage: {SA_results[-1]:.3f})")
+fig.colorbar(im3, ax=ax3, label="Intensity", shrink=0.7) # pyright: ignore
+
+im4 = draw_coverage_heatmap_on_ax(ax4, GA_best_X, room_vector, radius=3, resolution=RESOLUTION, upscale_factor=UPSCALE, blur_sigma=BLUR_SIGMA, title=f"GA Best Solution (Coverage: {GA_results[-1]:.3f})")
+fig.colorbar(im4, ax=ax4, label="Intensity", shrink=0.7)  # pyright: ignore
+
+plt.tight_layout()
+plt.show()
+```
