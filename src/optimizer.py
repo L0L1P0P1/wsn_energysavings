@@ -138,6 +138,7 @@ class SimulatedAnnealing(BaseOptimizer):
 
         best_sol = DeploymentSolution(current_sol.sensors.copy())
         best_sol.coverage_rate = current_sol.coverage_rate
+        best_sol.cost = current_sol.cost
         history = [current_sol.coverage_rate]
 
         temp = self.temp
@@ -208,6 +209,7 @@ class GeneticAlgorithm(BaseOptimizer):
                 best_f = pop[0].coverage_rate
                 best_sol = DeploymentSolution(pop[0].sensors.copy())
                 best_sol.coverage_rate = best_f
+                best_sol.cost = pop[0].cost
 
             history.append(best_f)
 
