@@ -2,6 +2,7 @@ import numpy as np
 from src.core import IndoorEnvironment, PropagationModel
 from src.optimizer.operators import SpatialOperators
 
+
 class DeploymentSolution:
     """Represents a two-tier network topology."""
 
@@ -23,16 +24,14 @@ class DeploymentSolution:
 
     @property
     def objectives(self) -> np.ndarray:
-        # Maximize Coverage, Maximize Reliability, Minimize Cost
-        # We negate the maximizing objectives for a standard minimum-sort.
-        # The penalty is heavily applied to push invalid topologies out of the Pareto front.
         return np.array(
             [
-                -self.coverage_rate + self.penalty,
-                -self.reliability + self.penalty,
-                self.cost + self.penalty,
+                -self.coverage_rate,
+                -self.reliability,
+                self.cost,
             ]
         )
+
 
 class BaseOptimizer:
     def __init__(
@@ -68,11 +67,22 @@ class BaseOptimizer:
             sol.penalty = 10000.0
             return
 
-        # 2. Coverage Objective (Eq 11)
-        dists = np.linalg.norm(
-            sol.sensors[:, None, :] - self.env.valid_cells[None, :, :], axis=2
+        # Map spatial coordinates to their exact indices in the precomputed matrices
+        s_idx = np.argmin(
+            np.linalg.norm(
+                sol.sensors[:, None, :] - self.env.valid_cells[None, :, :], axis=2
+            ),
+            axis=1,
         )
-        s_idx = np.argmin(dists, axis=1)
+        r_idx = np.argmin(
+            np.linalg.norm(
+                sol.relays[:, None, :] - self.env.valid_cells[None, :, :], axis=2
+            ),
+            axis=1,
+        )
+        bs_idx = np.argmin(np.linalg.norm(self.bs_pos - self.env.valid_cells, axis=1))
+
+        # 2. Coverage Objective (Eq 11)
         eff_dists = self.env.dist_mat[s_idx, :] / np.where(
             self.env.col_mat[s_idx, :] > 0, 1e-9, 1.0
         )
@@ -82,33 +92,17 @@ class BaseOptimizer:
         )
 
         # 3. Graph Connectivity Constraints & Reliability (Eq 12, 13, 22-25)
-        # Check Relays -> Base Station
-        dist_r_bs = np.linalg.norm(sol.relays - self.bs_pos, axis=1)
-        segments_r_bs = np.hstack(
-            (sol.relays, np.tile(self.bs_pos, (len(sol.relays), 1)))
-        )
-        cols_r_bs = np.array(
-            [self.env.count_collisions(seg, self.env.segments) for seg in segments_r_bs]
-        )
+        # Check Relays -> Base Station using O(1) Matrix Lookups
+        dist_r_bs = self.env.dist_mat[r_idx, bs_idx]
+        cols_r_bs = self.env.col_mat[r_idx, bs_idx]
 
         powers_r_bs = self.physics.received_power(dist_r_bs, cols_r_bs)
         prob_r_bs = self.physics.connection_probability(powers_r_bs)
-
         disconnected_relays = np.sum(prob_r_bs < self.connection_threshold)
 
-        # Check Sensors -> Relays
-        dist_s_r = np.linalg.norm(
-            sol.sensors[:, None, :] - sol.relays[None, :, :], axis=2
-        )
-        segments_s_r = np.hstack(
-            (
-                np.repeat(sol.sensors, len(sol.relays), axis=0),
-                np.tile(sol.relays, (len(sol.sensors), 1)),
-            )
-        )
-        cols_s_r = np.array(
-            [self.env.count_collisions(seg, self.env.segments) for seg in segments_s_r]
-        ).reshape(len(sol.sensors), len(sol.relays))
+        # Check Sensors -> Relays using O(1) Matrix Lookups
+        dist_s_r = self.env.dist_mat[s_idx[:, None], r_idx]
+        cols_s_r = self.env.col_mat[s_idx[:, None], r_idx]
 
         powers_s_r = self.physics.received_power(dist_s_r, cols_s_r)
         prob_s_r = self.physics.connection_probability(powers_s_r)
@@ -120,15 +114,16 @@ class BaseOptimizer:
         disconnected_sensors = np.sum(k_j == 0)
 
         # Apply strict constraint penalties
-        sol.penalty = (disconnected_relays + disconnected_sensors) * 1000.0
+        sol.penalty = float(disconnected_relays + disconnected_sensors)
 
         # Objective 3: Reliability Calculation (Eq 23, 24, 25)
         if len(k_j) > 0 and disconnected_sensors == 0:
             k_mean = np.mean(k_j)
             k_var = np.var(k_j)
-            sol.reliability = np.sum(k_mean - k_var)
+            sol.reliability = k_mean - k_var
         else:
             sol.reliability = 0.0
+
 
 class NSGA2(BaseOptimizer):
     """Multi-Objective Optimizer utilizing Pareto Dominance."""
@@ -146,44 +141,12 @@ class NSGA2(BaseOptimizer):
         self.pop_size = pop_size
         self.gens = gens
 
-    # ... (Keep your _fast_non_dominated_sort here. It natively supports 3 objectives) ...
-
-    def _crowding_distance_assignment(
-        self, front: list[int], population: list[DeploymentSolution]
-    ):
-        l = len(front)
-        for i in front:
-            population[i].crowding_distance = 0.0
-        if l <= 2:
-            for i in front:
-                population[i].crowding_distance = float("inf")
-            return
-
-        # Loop through all 3 objectives now
-        for m in range(3):
-            front.sort(key=lambda x: population[x].objectives[m])
-            population[front[0]].crowding_distance = float("inf")
-            population[front[-1]].crowding_distance = float("inf")
-
-            obj_min = population[front[0]].objectives[m]
-            obj_max = population[front[-1]].objectives[m]
-            if obj_max - obj_min == 0:
-                continue
-
-            for i in range(1, l - 1):
-                population[front[i]].crowding_distance += (
-                    population[front[i + 1]].objectives[m]
-                    - population[front[i - 1]].objectives[m]
-                ) / (obj_max - obj_min)
-
     def run(self, init_s: int, init_r: int) -> list[DeploymentSolution]:
         pop = []
         for _ in range(self.pop_size):
-            s = SpatialOperators.random_nodes(self.env, init_s)
-            r = SpatialOperators.random_nodes(
-                self.env, init_r, existing_occupied=set(map(tuple, s))
-            )
-            pop.append(DeploymentSolution(s, r))
+            # USE SMART INITIALIZATION HERE
+            sol = self._smart_initialize(init_s, init_r)
+            pop.append(sol)
 
         for ind in pop:
             self.evaluate(ind)
@@ -195,30 +158,10 @@ class NSGA2(BaseOptimizer):
             while len(offspring) < self.pop_size:
                 # Tournament Selection
                 t1, t2 = np.random.choice(len(pop), 2, replace=False)
-                p1 = (
-                    pop[t1]
-                    if (
-                        pop[t1].rank < pop[t2].rank
-                        or (
-                            pop[t1].rank == pop[t2].rank
-                            and pop[t1].crowding_distance > pop[t2].crowding_distance
-                        )
-                    )
-                    else pop[t2]
-                )
+                p1 = self._tournament(pop[t1], pop[t2])
 
                 t3, t4 = np.random.choice(len(pop), 2, replace=False)
-                p2 = (
-                    pop[t3]
-                    if (
-                        pop[t3].rank < pop[t4].rank
-                        or (
-                            pop[t3].rank == pop[t4].rank
-                            and pop[t3].crowding_distance > pop[t4].crowding_distance
-                        )
-                    )
-                    else pop[t4]
-                )
+                p2 = self._tournament(pop[t3], pop[t4])
 
                 # Crossover (Independently for sensors and relays)
                 child_s = SpatialOperators.crossover(
@@ -228,12 +171,29 @@ class NSGA2(BaseOptimizer):
                     p1.relays, p2.relays, self.env, avoid=set(map(tuple, child_s))
                 )
 
-                # Dynamic Mutation (Simplified for brevity, apply to both arrays)
-                if np.random.rand() < 0.4:
+                # ---------------------------------------------------------
+                # Dynamic Structural Mutation (Add, Remove, Move)
+                # ---------------------------------------------------------
+
+                # Mutate Sensor Tier
+                mut_prob_s = np.random.rand()
+                if mut_prob_s < 0.2:
+                    child_s = self._add_sensor(child_s)
+                elif mut_prob_s < 0.4:
+                    child_s = self._remove_sensor(child_s)
+                elif mut_prob_s < 0.7:
                     child_s = SpatialOperators.move_sensor(child_s, self.env)
-                if np.random.rand() < 0.4:
+
+                # Mutate Relay Tier
+                mut_prob_r = np.random.rand()
+                if mut_prob_r < 0.2:
+                    child_r = self._add_sensor(child_r)
+                elif mut_prob_r < 0.4:
+                    child_r = self._remove_sensor(child_r)
+                elif mut_prob_r < 0.7:
                     child_r = SpatialOperators.move_sensor(child_r, self.env)
 
+                # Ensure we don't accidentally evaluate empty network topologies
                 if len(child_s) > 0 and len(child_r) > 0:
                     child = DeploymentSolution(child_s, child_r)
                     self.evaluate(child)
@@ -272,6 +232,116 @@ class NSGA2(BaseOptimizer):
         idx = np.random.randint(len(sensors))
         return np.delete(sensors, idx, axis=0)
 
+    def _dominates(self, p: DeploymentSolution, q: DeploymentSolution) -> bool:
+        """Applies Deb's Constrained Domination Rules."""
+
+        if p.penalty < q.penalty:
+            return True
+        if p.penalty > q.penalty:
+            return False
+
+        return bool(
+            np.all(p.objectives <= q.objectives) and np.any(p.objectives < q.objectives)
+        )
+
+    def _tournament(
+        self, p1: DeploymentSolution, p2: DeploymentSolution
+    ) -> DeploymentSolution:
+        """Selects the best parent respecting feasibility (penalty), rank, and crowding."""
+        # 1. Feasibility rules (lower penalty always wins)
+        if p1.penalty < p2.penalty:
+            return p1
+        if p2.penalty < p1.penalty:
+            return p2
+
+        # 2. If equally feasible (or equally infeasible), check Pareto rank
+        if p1.rank < p2.rank:
+            return p1
+        if p2.rank < p1.rank:
+            return p2
+
+        # 3. If same rank, prefer less crowded space for better diversity
+        return p1 if p1.crowding_distance > p2.crowding_distance else p2
+
+    def _smart_initialize(self, init_s: int, init_r: int) -> DeploymentSolution:
+        """Deterministically spawns a fully connected topology to bypass the Constraint Cliff."""
+        # 1. Find Base Station Index
+        bs_idx = np.argmin(np.linalg.norm(self.bs_pos - self.env.valid_cells, axis=1))
+
+        # 2. Find Valid Relay Cells (must have prob >= threshold to BS)
+        dist_to_bs = self.env.dist_mat[:, bs_idx]
+        cols_to_bs = self.env.col_mat[:, bs_idx]
+        prob_to_bs = self.physics.connection_probability(
+            self.physics.received_power(dist_to_bs, cols_to_bs)
+        )
+
+        valid_r_idx = np.where(prob_to_bs >= self.connection_threshold)[0]
+        if len(valid_r_idx) < init_r:
+            if len(valid_r_idx) == 0:
+                raise ValueError(
+                    "CRITICAL: Base Station is completely isolated. Move it or lower the threshold."
+                )
+            chosen_r_idx = np.random.choice(
+                valid_r_idx, size=len(valid_r_idx), replace=False
+            )
+        else:
+            chosen_r_idx = np.random.choice(valid_r_idx, size=init_r, replace=False)
+
+        relays = self.env.valid_cells[chosen_r_idx]
+
+        # 3. Find Valid Sensor Cells (must have prob >= threshold to ANY chosen Relay)
+        dist_to_relays = self.env.dist_mat[:, chosen_r_idx]
+        cols_to_relays = self.env.col_mat[:, chosen_r_idx]
+        prob_to_relays = self.physics.connection_probability(
+            self.physics.received_power(dist_to_relays, cols_to_relays)
+        )
+
+        # Get the best connection probability to any of the placed relays
+        max_prob_to_r = np.max(prob_to_relays, axis=1)
+        valid_s_idx = np.where(max_prob_to_r >= self.connection_threshold)[0]
+
+        # Prevent sensors from spawning exactly on top of relays
+        valid_s_idx = np.setdiff1d(valid_s_idx, chosen_r_idx)
+
+        if len(valid_s_idx) < init_s:
+            chosen_s_idx = np.random.choice(
+                valid_s_idx, size=len(valid_s_idx), replace=False
+            )
+        else:
+            chosen_s_idx = np.random.choice(valid_s_idx, size=init_s, replace=False)
+
+        sensors = self.env.valid_cells[chosen_s_idx]
+
+        return DeploymentSolution(sensors, relays)
+
+    def _crowding_distance_assignment(
+        self, front: list[int], population: list[DeploymentSolution]
+    ):
+        l = len(front)
+        for i in front:
+            population[i].crowding_distance = 0.0
+        if l <= 2:
+            for i in front:
+                population[i].crowding_distance = float("inf")
+            return
+
+        # Loop through all 3 objectives now
+        for m in range(3):
+            front.sort(key=lambda x: population[x].objectives[m])
+            population[front[0]].crowding_distance = float("inf")
+            population[front[-1]].crowding_distance = float("inf")
+
+            obj_min = population[front[0]].objectives[m]
+            obj_max = population[front[-1]].objectives[m]
+            if obj_max - obj_min == 0:
+                continue
+
+            for i in range(1, l - 1):
+                population[front[i]].crowding_distance += (
+                    population[front[i + 1]].objectives[m]
+                    - population[front[i - 1]].objectives[m]
+                ) / (obj_max - obj_min)
+
     def _fast_non_dominated_sort(
         self, population: list[DeploymentSolution]
     ) -> list[list[int]]:
@@ -282,16 +352,9 @@ class NSGA2(BaseOptimizer):
 
         for p in range(N):
             for q in range(N):
-                obj_p = population[p].objectives
-                obj_q = population[q].objectives
-
-                # p dominates q if p is strictly better in at least one, and no worse in others
-                p_dom_q = np.all(obj_p <= obj_q) and np.any(obj_p < obj_q)
-                q_dom_p = np.all(obj_q <= obj_p) and np.any(obj_q < obj_p)
-
-                if p_dom_q:
+                if self._dominates(population[p], population[q]):
                     S[p].append(q)
-                elif q_dom_p:
+                elif self._dominates(population[q], population[p]):
                     n[p] += 1
 
             if n[p] == 0:

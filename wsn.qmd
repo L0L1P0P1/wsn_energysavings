@@ -103,7 +103,7 @@ Second, we implement a **Genetic Algorithm (GA)**. While SA is a single-solution
 With the environment precomputed and the metaheuristics defined, we execute both the SA and GA pipelines and evaluate their final performance. By comparing their optimization trajectories alongside the final infrastructure costs and high-resolution spatial coverage maps, we can determine the most efficient WSN deployment strategy for the given indoor topology.
 
 ```{python}
-from src.optimizer import SimulatedAnnealing, GeneticAlgorithm
+from src.optimizer.single_tier import SimulatedAnnealing, GeneticAlgorithm
 
 K_SENSORS = 12
 SA_ITERS = 10000
@@ -188,6 +188,62 @@ fig.colorbar(im4, ax=ax4, label="Intensity", shrink=0.7)
 
 plt.tight_layout()
 plt.show()
+```
+
+
+## NSGA-II
+
+```{python}
+from src.optimizer.nsga2 import NSGA2
+
+# 1. Define Base Station Position
+base_station_pos = np.array([5, 5])
+
+# 2. Run the 3D Multi-Objective Optimizer
+optimizer = NSGA2(env, physics, bs_pos=base_station_pos, radius=3.0, pop_size=20, gens=500)
+
+optimizer.connection_threshold = 0.3
+
+# Pass initial counts for both tiers
+pareto_population = optimizer.run(init_s=10, init_r=4)
+
+# Filter for valid network graphs
+# valid_layouts = [sol for sol in pareto_population if sol.penalty == 0]
+valid_layouts = [sol for sol in pareto_population]
+
+print(f"Discovered {len(valid_layouts)} strictly valid, non-dominated deployment layouts.")
+for idx, sol in enumerate(valid_layouts):
+    print(f"Layout {idx}: Cost={sol.cost}, Coverage={sol.coverage_rate:.2f}, Reliability={sol.reliability:.2f}, Penalty={sol.penalty}, Sensors={len(sol.sensors)}, Relays={len(sol.relays)}")
 
 ```
 
+
+```{python}
+import matplotlib.pyplot as plt
+
+costs = [sol.cost for sol in valid_layouts]
+coverages = [sol.coverage_rate for sol in valid_layouts]
+reliabilities = [sol.reliability for sol in valid_layouts]
+
+fig = plt.figure(figsize=(8, 4))
+ax = fig.add_subplot(111, projection='3d')
+
+# Scatter plot the valid Pareto solutions
+sc = ax.scatter(costs, coverages, reliabilities, c=reliabilities, cmap='viridis', s=50, depthshade=True)
+
+ax.set_xlabel('Network Cost (Lower is Better)')
+ax.set_ylabel('Coverage Rate (Higher is Better)')
+ax.set_zlabel('Reliability (Higher is Better)')
+ax.set_title('3D Pareto Front: WSN Deployment')
+
+# Add a color bar to highlight reliability gradients
+cbar = plt.colorbar(sc, ax=ax, pad=0.1)
+cbar.set_label('Reliability Score')
+
+plt.show()
+```
+
+
+
+To do:
+- set some proper obstacle loss / transmit power / etc
