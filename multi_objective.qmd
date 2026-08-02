@@ -74,7 +74,7 @@ base_station_pos = np.array([5, 5])
 physics.ptx = -38
 
 # 2. Run the 3D Multi-Objective Optimizer
-optimizer = NSGA2(env, physics, bs_pos=base_station_pos, radius=3.0, pop_size=40, gens=1000)
+optimizer = NSGA2(env, physics, bs_pos=base_station_pos, radius=3.0, pop_size=100, gens=1000)
 optimizer.connection_threshold = 0.3
 
 # 3. Execute with initial tier constraints
