@@ -111,15 +111,22 @@ class BaseOptimizer:
         links = (prob_s_r >= self.connection_threshold).astype(int)
         k_j = np.sum(links, axis=1)  # Links per sensor (Eq 22)
 
+        # Caping redundancy
+        k_j_capped = np.clip(k_j, 0, 3)
+
         disconnected_sensors = np.sum(k_j == 0)
 
+        hierarchy_penalty = 1.0 if len(sol.relays) > len(sol.sensors) else 0.0
+
         # Apply strict constraint penalties
-        sol.penalty = float(disconnected_relays + disconnected_sensors)
+        sol.penalty = float(
+            disconnected_relays + disconnected_sensors + hierarchy_penalty
+        )
 
         # Objective 3: Reliability Calculation (Eq 23, 24, 25)
-        if len(k_j) > 0 and disconnected_sensors == 0:
-            k_mean = np.mean(k_j)
-            k_var = np.var(k_j)
+        if len(k_j_capped) > 0 and sol.penalty == 0.0:
+            k_mean = np.mean(k_j_capped)
+            k_var = np.var(k_j_capped)
             sol.reliability = k_mean - k_var
         else:
             sol.reliability = 0.0
@@ -170,10 +177,6 @@ class NSGA2(BaseOptimizer):
                 child_r = SpatialOperators.crossover(
                     p1.relays, p2.relays, self.env, avoid=set(map(tuple, child_s))
                 )
-
-                # ---------------------------------------------------------
-                # Dynamic Structural Mutation (Add, Remove, Move)
-                # ---------------------------------------------------------
 
                 # Mutate Sensor Tier
                 mut_prob_s = np.random.rand()

@@ -1,0 +1,119 @@
+---
+jupyter:
+  jupytext:
+    text_representation:
+      extension: .qmd
+      format_name: quarto
+      format_version: '1.0'
+      jupytext_version: 1.19.3
+  kernelspec:
+    display_name: Python (academia)
+    language: python
+    name: academia
+execute:
+  dir: project
+---
+
+# Multi-Objective Two-Tier Edge WiFi Sensor Deployment
+
+This pipeline models the deployment of a two-tier Wireless Sensor Network (WSN) in a 2D indoor environment. Utilizing the NSGA-II evolutionary algorithm, this optimization maps the 3D Pareto front to balance **Coverage**, **Reliability**, and **Infrastructure Cost**.
+
+## 1. Environment & Physics Setup
+
+We discretize the building floor plan into a 2D binary matrix where `0` represents open space and `-1` represents walls. We model the signal propagation using a log-normal shadowing model tailored for indoor environments.
+
+The received power decays logarithmically with distance but is heavily penalized by obstacle path loss $L_{obs}$ whenever the line-of-sight intersects a wall. 
+
+$$ P_{rec}(d) = P_{tr} - PL(d_0) - 10n \log \left(\frac{d}{d_0}\right) + \chi_{\sigma} - L_{obs} $$
+
+$$\rho (s,d(s,rec)) = Q \left[ \frac {\lambda - P_{rec}(d)}{\sigma} \right]$$
+
+```{python}
+import numpy as np
+import matplotlib.pyplot as plt
+from src.core import IndoorEnvironment, PropagationModel
+
+np.random.seed(46)
+
+room = np.array([
+    [1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1],
+    [1, 0, 0, 0, 0, 0, 0, 0, 1, 0, 0, 0, 0, 0, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1],
+    [1, 0, 0, 0, 0, 0, 0, 0, 1, 0, 0, 0, 0, 0, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1],
+    [1, 0, 0, 0, 0, 0, 0, 0, 1, 0, 0, 0, 0, 0, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1],
+    [1, 0, 0, 0, 0, 0, 0, 0, 1, 0, 0, 0, 0, 0, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1],
+    [1, 1, 1, 1, 1, 1, 0, 0, 1, 1, 1, 1, 0, 0, 1, 1, 1, 1, 1, 0, 0, 0, 0, 0, 1],
+    [1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 0, 1, 0, 0, 0, 0, 0, 0, 1, 0, 0, 0, 0, 0, 1],
+    [1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 0, 1, 0, 0, 0, 0, 0, 0, 1, 0, 0, 0, 0, 0, 1],
+    [1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 0, 1, 0, 0, 0, 0, 0, 0, 1, 0, 0, 0, 0, 0, 1],
+    [1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 0, 1, 0, 0, 0, 0, 0, 0, 1, 0, 0, 0, 0, 0, 1],
+    [1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 0, 1, 0, 0, 0, 0, 0, 0, 1, 0, 0, 0, 0, 0, 1],
+    [1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 0, 1, 0, 0, 0, 0, 0, 0, 1, 0, 0, 0, 0, 0, 1],
+    [1, 0, 0, 0, 0, 0, 0, 0, 1, 1, 1, 1, 0, 0, 0, 0, 1, 1, 1, 1, 0, 0, 0, 0, 1],
+    [1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1],
+    [1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1],
+])
+room *= -1
+room = room.T
+
+env = IndoorEnvironment(room)
+physics = PropagationModel(obstacle_loss=10.0)
+
+```
+
+## 2. NSGA-II Execution
+We configure a two-tier network containing edge sensors and relay (sink) nodes routing data back to a central Base Station. By applying Deb's Feasibility Rules, we ensure all generated layouts are fully connected graph topologies.
+
+```{python}
+%load_ext autoreload
+%autoreload 2
+
+from src.optimizer.nsga2 import NSGA2
+
+# 1. Define Base Station Position and Tune Transmitter
+base_station_pos = np.array([5, 5])
+physics.ptx = -38
+
+# 2. Run the 3D Multi-Objective Optimizer
+optimizer = NSGA2(env, physics, bs_pos=base_station_pos, radius=3.0, pop_size=40, gens=1000)
+optimizer.connection_threshold = 0.3
+
+# 3. Execute with initial tier constraints
+pareto_population = optimizer.run(init_s=10, init_r=6)
+
+# 4. Filter for mathematically valid network graphs
+valid_layouts = [sol for sol in pareto_population if sol.penalty == 0]
+
+print(f"Discovered {len(valid_layouts)} strictly valid, non-dominated deployment layouts.")
+for idx, sol in enumerate(valid_layouts):
+    print(f"Layout {idx}: Cost={sol.cost}, Coverage={sol.coverage_rate:.2f}, Reliability={sol.reliability:.2f}, Penalty={sol.penalty}, Sensors={len(sol.sensors)}, Relays={len(sol.relays)}")
+
+```
+
+## 3. Visualizing the Pareto Front
+
+To properly analyze the mathematical trade-offs between deployment cost, signal coverage, and topological reliability, we project the discovered solutions into a 3D scatter plot.
+
+```{python}
+costs = [sol.cost for sol in valid_layouts]
+coverages = [sol.coverage_rate for sol in valid_layouts]
+reliabilities = [sol.reliability for sol in valid_layouts]
+
+fig = plt.figure(figsize=(12, 8))
+ax = fig.add_subplot(111, projection='3d')
+
+# Scatter plot the valid Pareto solutions
+sc = ax.scatter(costs, coverages, reliabilities, c=reliabilities, cmap='viridis', s=50, depthshade=True)
+
+ax.set_xlabel('Network Cost (Lower is Better)')
+ax.set_ylabel('Coverage Rate (Higher is Better)')
+ax.set_zlabel('Reliability (Higher is Better)')
+ax.set_title('3D Pareto Front: WSN Deployment')
+
+# Add a color bar to highlight reliability gradients
+cbar = plt.colorbar(sc, ax=ax, pad=0.1)
+cbar.set_label('Reliability Score')
+
+plt.show()
+```
+
+

@@ -14,8 +14,8 @@ execute:
   dir: project
 ---
 
-# Multi-Objective Edge WiFi Sensor Deployment
-This pipeline models the deployment of a Wireless Sensor Network (WSN) in a 2D indoor environment. The optimization targets maximizing area coverage and connectivity while minimizing infrastructure cost, utilizing precomputed collision matrices to accelerate the metaheuristic search space evaluation.
+# Single-Objective Edge WiFi Sensor Deployment
+This pipeline models the deployment of a single-tier Wireless Sensor Network (WSN) in a 2D indoor environment. The optimization targets maximizing area coverage while strictly limiting the infrastructural footprint, utilizing precomputed collision matrices to accelerate the metaheuristic search space evaluation.
 
 ## 1. Environment & Vectorized Geometry Setup
 Deploying edge sensor nodes in a complex indoor environment is a classic combinatorial optimization problem. Traditional deployments often yield cost-inefficient networks or suffer from dead zones due to indoor interference.
@@ -199,16 +199,17 @@ from src.optimizer.nsga2 import NSGA2
 # 1. Define Base Station Position
 base_station_pos = np.array([5, 5])
 
+physics.ptx = -38
+
 # 2. Run the 3D Multi-Objective Optimizer
 optimizer = NSGA2(env, physics, bs_pos=base_station_pos, radius=3.0, pop_size=20, gens=500)
 
 optimizer.connection_threshold = 0.3
 
 # Pass initial counts for both tiers
-pareto_population = optimizer.run(init_s=10, init_r=4)
+pareto_population = optimizer.run(init_s=10, init_r=6)
 
 # Filter for valid network graphs
-# valid_layouts = [sol for sol in pareto_population if sol.penalty == 0]
 valid_layouts = [sol for sol in pareto_population]
 
 print(f"Discovered {len(valid_layouts)} strictly valid, non-dominated deployment layouts.")
@@ -225,7 +226,7 @@ costs = [sol.cost for sol in valid_layouts]
 coverages = [sol.coverage_rate for sol in valid_layouts]
 reliabilities = [sol.reliability for sol in valid_layouts]
 
-fig = plt.figure(figsize=(8, 4))
+fig = plt.figure(figsize=(12, 8))
 ax = fig.add_subplot(111, projection='3d')
 
 # Scatter plot the valid Pareto solutions
@@ -242,8 +243,3 @@ cbar.set_label('Reliability Score')
 
 plt.show()
 ```
-
-
-
-To do:
-- set some proper obstacle loss / transmit power / etc
