@@ -120,7 +120,6 @@ GA_best_sol, GA_results = ga.run(init_k=K_SENSORS)
 
 
 ```{python}
-# FIX: Removed constrained_layout=True
 fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(15, 6))
 
 # Plot 1: Optimization Curve
@@ -133,7 +132,6 @@ ax1.legend()
 ax1.grid(True, alpha=0.3)
 
 # Plot 2: Deployment Cost
-# FIX: Calculate cost dynamically to bypass cached object state
 sa_cost = len(SA_best_sol.sensors)
 ga_cost = len(GA_best_sol.sensors)
 

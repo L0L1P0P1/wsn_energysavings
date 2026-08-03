@@ -70,23 +70,27 @@ We configure a two-tier network containing edge sensors and relay (sink) nodes r
 from src.optimizer.nsga2 import NSGA2
 
 # 1. Define Base Station Position and Tune Transmitter
-base_station_pos = np.array([5, 5])
+base_station_pos = np.array([15, 6])
 physics.ptx = -38
 
 # 2. Run the 3D Multi-Objective Optimizer
-optimizer = NSGA2(env, physics, bs_pos=base_station_pos, radius=3.0, pop_size=100, gens=1000)
+optimizer = NSGA2(env, physics, bs_pos=base_station_pos, radius=3.0, pop_size=20, gens=10000)
 optimizer.connection_threshold = 0.3
 
 # 3. Execute with initial tier constraints
-pareto_population = optimizer.run(init_s=10, init_r=6)
+pareto_population = optimizer.run(init_s=14, init_r=6)
 
 # 4. Filter for mathematically valid network graphs
 valid_layouts = [sol for sol in pareto_population if sol.penalty == 0]
 
-print(f"Discovered {len(valid_layouts)} strictly valid, non-dominated deployment layouts.")
-for idx, sol in enumerate(valid_layouts):
-    print(f"Layout {idx}: Cost={sol.cost}, Coverage={sol.coverage_rate:.2f}, Reliability={sol.reliability:.2f}, Penalty={sol.penalty}, Sensors={len(sol.sensors)}, Relays={len(sol.relays)}")
+# 5. Sorting the Front
+valid_layouts.sort(key=lambda x: x.cost)
+valid_layouts.sort(key=lambda x: x.reliability, reverse=True)
+valid_layouts.sort(key=lambda x: x.coverage_rate, reverse=True)
 
+print(f"Discovered {len(valid_layouts)} strictly valid, non-dominated deployment layouts.")
+for idx, sol in enumerate(valid_layouts[:5]):
+    print(f"Layout {idx}: Cost={sol.cost}, Coverage={sol.coverage_rate:.2f}, Reliability={sol.reliability:.2f}, Penalty={sol.penalty}, Sensors={len(sol.sensors)}, Relays={len(sol.relays)}")
 ```
 
 ## 3. Visualizing the Pareto Front
@@ -117,3 +121,30 @@ plt.show()
 ```
 
 
+## 4. Visualizing a Solution from the Pareto Front
+
+```{python}
+from src.visualization import EnvironmentVisualizer
+
+sample_solution = valid_layouts[0]
+
+viz = EnvironmentVisualizer(env, physics)
+
+fig, ax = plt.subplots(1, 1, figsize=(18, 7))
+
+RESOLUTION=0.5
+UPSCALE=15
+BLUR_SIGMA=6
+
+im3 = viz.draw_coverage_heatmap_on_ax(
+    ax=ax, 
+    sensors=sample_solution.sensors, 
+    radius=3, 
+    relays=sample_solution.relays, 
+    bs_pos=base_station_pos, 
+    resolution=RESOLUTION, 
+    upscale_factor=UPSCALE, 
+    blur_sigma=BLUR_SIGMA, 
+    title=f"NSGA-II Pareto Front Sample Solution (Coverage: {sample_solution.coverage_rate:.3f})"
+)
+```
